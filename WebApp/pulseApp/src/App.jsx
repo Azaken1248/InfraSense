@@ -15,7 +15,7 @@ const App = () => {
     const unsubscribe = fetchFirebaseData(
       (fetchedData) => {
         setData(fetchedData); 
-        setLoading(false);
+        setTimeout(() => {setLoading(false)},3000);
       },
       (err) => {
         setError(err.message); 
