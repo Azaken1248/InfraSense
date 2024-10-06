@@ -1,0 +1,40 @@
+.progress-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-direction: column;
+    position: relative;
+    width: 160px; 
+    height: 160px; 
+  }
+  
+  .progress-ring {
+    transform: rotate(-90deg);
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  
+  .progress-ring__circle,
+  .progress-ring__circle-bg {
+    transition: stroke-dashoffset 0.35s;
+    transform: rotate(-90deg);
+    transform-origin: 50% 50%;
+  }
+  
+  .blurred-ring {
+    position: absolute;
+    top: 0;
+    left: 0;
+    filter: blur(10px);
+  }
+  
+  .progress-value {
+    position: relative;
+    margin-top: 10px;
+    font-size: 24px; 
+    font-weight: bold;
+    text-shadow: 0px 0px 10px rgba(0, 0, 0, 0.5);
+    z-index: 1;
+  }
+  
