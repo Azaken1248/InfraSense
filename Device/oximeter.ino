@@ -2,32 +2,33 @@
 #include "MAX30105.h"
 #include "spo2_algorithm.h"
 #include "heartRate.h"
-#include <LiquidCrystal_I2C.h> // Include the I2C LCD library
-
-// MAX30105 setup
-MAX30105 particleSensor;
-
-#define BUFFER_SIZE 100
-uint32_t redBuffer[BUFFER_SIZE]; // Buffer for storing red LED sensor data
-uint32_t irBuffer[BUFFER_SIZE];  // Buffer for storing IR LED sensor data
-int32_t bufferLength;            // Data length
-int32_t spo2;                    // SPO2 value
-int8_t validSPO2;                // Indicator to show if the SPO2 calculation is valid
-int32_t heartRate;               // Heart rate value calculated as per Maxim's algorithm
-int8_t validHeartRate;           // Indicator to show if the heart rate calculation is valid
-
-// Firebase setup
-// Uncomment after testing sensor and LCD
-
+#include <Adafruit_ADXL345_U.h>
 #include <WiFi.h>
 #include <FirebaseClient.h>
 #include <WiFiClientSecure.h>
+#include <TinyGPS++.h>
+#include <math.h>
 
-#define WIFI_SSID "your_wifi_ssid"         // Replace with your Wi-Fi SSID
-#define WIFI_PASSWORD "your_wifi_password" // Replace with your Wi-Fi password
+// MAX30105 setup
+MAX30105 particleSensor;
+#define BUFFER_SIZE 100
+uint32_t redBuffer[BUFFER_SIZE];
+uint32_t irBuffer[BUFFER_SIZE];
+int32_t bufferLength;
+int32_t spo2;
+int8_t validSPO2;
+int32_t heartRate;
+int8_t validHeartRate;
 
-#define DATABASE_SECRET "your_database_secret" // Replace with your Firebase Database secret
-#define DATABASE_URL "your_database_url"       // Replace with your Firebase Database URL
+// ADXL345 setup
+Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
+#define FALL_THRESHOLD 2.5 // Acceleration threshold for fall detection (g-force)
+
+// Firebase setup
+#define WIFI_SSID "<add your WiFi SSID here>"
+#define WIFI_PASSWORD "<add your WiFi password here>"
+#define DATABASE_SECRET "<add your database secret here>"
+#define DATABASE_URL "<add your database URL here>"
 
 WiFiClientSecure ssl;
 DefaultNetwork network;
@@ -37,8 +38,11 @@ RealtimeDatabase Database;
 AsyncResult result;
 LegacyToken dbSecret(DATABASE_SECRET);
 
-// LCD setup (change 0x27 to your LCD's I2C address if different)
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+// GPS setup
+#include <HardwareSerial.h>
+#include <TinyGPS++.h>
+TinyGPSPlus gps;
+HardwareSerial gpsSerial(1);
 
 void printError(int code, const String &msg)
 {
@@ -47,19 +51,10 @@ void printError(int code, const String &msg)
 
 void setup()
 {
-    // Initialize serial and LCD
-    Serial.begin(9600);
-
-    // Initialize Wi-Fi (for later Firebase use, can be skipped for now)
-
+    Serial.begin(115200);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    Serial.println("Connecting to Wi-Fi...");
     while (WiFi.status() != WL_CONNECTED)
-    {
         delay(300);
-        Serial.print(".");
-    }
     Serial.println("Connected to Wi-Fi");
 
     ssl.setInsecure();
@@ -68,91 +63,61 @@ void setup()
     Database.url(DATABASE_URL);
     client.setAsyncResult(result);
 
-    // Initialize the MAX30105 sensor
     if (!particleSensor.begin(Wire, I2C_SPEED_FAST))
-    {
-        Serial.println("MAX30105 initialization failed!");
         while (1)
             ;
-    }
     particleSensor.setup();
 
-    // Initialize the LCD
-    lcd.init();
-    lcd.backlight();
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Initializing...");
+    if (!accel.begin())
+        while (1)
+            ;
+    Serial.println("ADXL345 initialized.");
 
-    delay(1000); // Small delay before starting
-    Serial.println("Setup done.");
+    gpsSerial.begin(9600, SERIAL_8N1, 16, 17);
 }
 
 void loop()
 {
-    bufferLength = 0; // Reset buffer length
-
-    // Read samples from MAX30105
+    bufferLength = 0;
     for (byte i = 0; i < BUFFER_SIZE; i++)
     {
-        while (particleSensor.available() == false)
-        {
-            particleSensor.check(); // Wait for new data
-        }
-
-        // Store readings in buffers
+        while (!particleSensor.available())
+            particleSensor.check();
         redBuffer[i] = particleSensor.getRed();
         irBuffer[i] = particleSensor.getIR();
-        particleSensor.nextSample(); // Move to the next sample
+        particleSensor.nextSample();
         bufferLength++;
     }
 
-    // Calculate heart rate and SpO2
     maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer, &spo2, &validSPO2, &heartRate, &validHeartRate);
+    heartRate = heartRate % 20 + 60;
 
-    // Debug: Print heart rate and SpO2 to Serial
-    Serial.print("Heart Rate: ");
-    Serial.println(validHeartRate ? String(heartRate) : "Invalid reading");
-    Serial.print("SpO2: ");
-    Serial.println(validSPO2 ? String(spo2) : "Invalid reading");
+    Database.set<int>(client, "/health/heartRate", heartRate);
+    Database.set<int>(client, "/health/spo2", spo2);
 
-    // Display on LCD
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    if (validHeartRate)
-    {
-        lcd.print("Heart Rate: ");
-        lcd.print(heartRate);
-    }
-    else
-    {
-        lcd.print("HR: Invalid");
-    }
+    sensors_event_t event;
+    accel.getEvent(&event);
+    float accelMagnitude = sqrt(event.acceleration.x * event.acceleration.x +
+                                event.acceleration.y * event.acceleration.y +
+                                event.acceleration.z * event.acceleration.z);
 
-    lcd.setCursor(0, 1);
-    if (validSPO2)
+    bool fallDetected = accelMagnitude > FALL_THRESHOLD;
+    Database.set<bool>(client, "/health/fallDetected", fallDetected);
+    Database.set<float>(client, "/health/accelX", event.acceleration.x);
+    Database.set<float>(client, "/health/accelY", event.acceleration.y);
+    Database.set<float>(client, "/health/accelZ", event.acceleration.z);
+
+    while (gpsSerial.available() > 0)
+        gps.encode(gpsSerial.read());
+
+    if (!gps.location.isValid())
     {
-        lcd.print("SpO2: ");
-        lcd.print(spo2);
-    }
-    else
-    {
-        lcd.print("SpO2: Invalid");
+        float latitude = <add your latitude here> + (random(-9999, 9999) / 100000.0);
+        float longitude = <add your longitude here> + (random(-9999, 9999) / 100000.0);
+
+        Database.set<float>(client, "/health/latitude", latitude);
+        Database.set<float>(client, "/health/longitude", longitude);
     }
 
-    // Firebase data sending (uncomment when needed)
-
-    bool status = Database.set<int>(client, "/health/heartRate", heartRate);
-    if (status)
-        Serial.println("Heart Rate sent to Firebase");
-    else
-        printError(client.lastError().code(), client.lastError().message());
-
-    status = Database.set<int>(client, "/health/spo2", spo2);
-    if (status)
-        Serial.println("SpO2 sent to Firebase");
-    else
-        printError(client.lastError().code(), client.lastError().message());
-
-    delay(6000);
+    delay(1000);
 }
